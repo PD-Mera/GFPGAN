@@ -103,5 +103,5 @@ if __name__ == '__main__':
         ],
         license='Apache License Version 2.0',
         setup_requires=['cython', 'numpy'],
-        install_requires=get_requirements(),
+        # install_requires=get_requirements(),
         zip_safe=False)
