@@ -201,7 +201,7 @@ class GFPGANCustomModelV1(BaseModel):
 
     def feed_data(self, data):
         # self.lq = data['lq'].to(self.device)
-        self.lq = torch.cat([data[i]['lq'] for i in range(0, self.opt['datasets']["train"]["max_img"])], dim=1).to(self.device)
+        self.lq = torch.cat([data[i]['lq'] for i in range(0, self.opt['datasets']["train"]["max_img"])], dim=0).to(self.device)
         if 'gt' in data[0]:
             # self.gt = data['gt'].to(self.device)
             self.gt = data[0]['gt'].to(self.device)
@@ -507,7 +507,7 @@ class GFPGANCustomModelV1(BaseModel):
             pbar = tqdm(total=len(dataloader), unit='image')
 
         for idx, val_data in enumerate(dataloader):
-            img_name = osp.splitext(osp.basename(val_data['lq_path'][0]))[0]
+            img_name = osp.splitext(osp.basename(val_data[0]['gt_path'][0]))[0]
             self.feed_data(val_data)
             self.test()
 
@@ -518,7 +518,11 @@ class GFPGANCustomModelV1(BaseModel):
                 metric_data['img2'] = gt_img
                 del self.gt
 
-            lq_img = tensor2img(self.lq, min_max=(-1, 1))
+            lq_img_0 = tensor2img(self.lq[0], min_max=(-1, 1))
+            lq_img_1 = tensor2img(self.lq[1], min_max=(-1, 1))
+            lq_img_2 = tensor2img(self.lq[2], min_max=(-1, 1))
+            lq_img_3 = tensor2img(self.lq[3], min_max=(-1, 1))
+            lq_img_4 = tensor2img(self.lq[4], min_max=(-1, 1))
 
             # tentative for out of GPU memory
             del self.lq
@@ -537,7 +541,7 @@ class GFPGANCustomModelV1(BaseModel):
                         save_img_path = osp.join(self.opt['path']['visualization'], dataset_name,
                                                  f'{img_name}_{self.opt["name"]}.png')
                 # imwrite(sr_img, save_img_path)
-                imwrite(np.concatenate([lq_img, sr_img, gt_img], axis = 1), save_img_path)
+                imwrite(np.concatenate([lq_img_0, lq_img_1, lq_img_2, lq_img_3, lq_img_4, sr_img, gt_img], axis = 1), save_img_path)
 
 
             if with_metrics:

@@ -218,34 +218,91 @@ class ResUpBlock(nn.Module):
         out = (out + skip) / math.sqrt(2)
         return out
 
-class SelfAttention1D(nn.Module):
-    def __init__(self, input_dim):
-        super(SelfAttention1D, self).__init__()
-        self.input_dim = input_dim
-        self.query = nn.Linear(input_dim, input_dim)
-        self.key = nn.Linear(input_dim, input_dim)
-        self.value = nn.Linear(input_dim, input_dim)
-        self.softmax = nn.Softmax(dim=2)
+
+def Normalize(in_channels):
+    return torch.nn.GroupNorm(num_groups=1, num_channels=in_channels, eps=1e-6, affine=True)
+    
+    
+class MultiHeadAttnBlock(nn.Module):
+    def __init__(self, in_channels, head_size=1):
+        super().__init__()
+        self.in_channels = in_channels
+        self.head_size = head_size
+        self.att_size = in_channels // head_size
+        assert(in_channels % head_size == 0), 'The size of head should be divided by the number of channels.'
+
+        self.norm1 = Normalize(in_channels)
+        self.norm2 = Normalize(in_channels)
+
+        self.q = torch.nn.Conv2d(in_channels,
+                                 in_channels,
+                                 kernel_size=1,
+                                 stride=1,
+                                 padding=0)
+        self.k = torch.nn.Conv2d(in_channels,
+                                 in_channels,
+                                 kernel_size=1,
+                                 stride=1,
+                                 padding=0)
+        self.v = torch.nn.Conv2d(in_channels,
+                                 in_channels,
+                                 kernel_size=1,
+                                 stride=1,
+                                 padding=0)
+        self.proj_out = torch.nn.Conv2d(in_channels,
+                                        in_channels,
+                                        kernel_size=1,
+                                        stride=1,
+                                        padding=0)
+        self.num = 0
+
+    def forward(self, x, y=None):
+        h_ = x
+        h_ = self.norm1(h_)
+        if y is None:
+            y = h_
+        else:
+            y = self.norm2(y)
+
+        q = self.q(y)
+        k = self.k(h_)
+        v = self.v(h_)
+
+        # compute attention
+        b,c,h,w = q.shape
+        q = q.reshape(b, self.head_size, self.att_size ,h*w) 
+        q = q.permute(3, 0, 1, 2) # hw, b, head, att
+
+        k = k.reshape(b, self.head_size, self.att_size ,h*w) 
+        k = k.permute(3, 0, 1, 2)
+
+        v = v.reshape(b, self.head_size, self.att_size ,h*w) 
+        v = v.permute(3, 0, 1, 2)
+
+
+        q = q.transpose(1, 2)
+        v = v.transpose(1, 2)
+        k = k.transpose(1, 2).transpose(2,3)
+
+        scale = int(self.att_size)**(-0.5)
+        q.mul_(scale)
+        w_ = torch.matmul(q, k)
+        w_ = F.softmax(w_, dim=3)
+
+        w_ = w_.matmul(v)
+
+        w_ = w_.transpose(1, 2).contiguous() # [b, h*w, head, att]
+        w_ = w_.view(-1, h, w, b)
+        w_ = w_.permute(3, 0, 1, 2)
+
+        w_ = self.proj_out(w_)
         
-    def forward(self, x):
-        queries = self.query(x)
-        keys = self.key(x)
-        values = self.value(x)
-        scores = torch.bmm(queries, keys.transpose(1, 2)) / (self.input_dim ** 0.5)
-        attention = self.softmax(scores)
-        weighted = torch.bmm(attention, values)
-        # print(x.size())
-        # print(torch.max(x + weighted, dim=1, keepdim=True).values.size())
-        # assert False
-        # print(x.size())
-        # print(weighted.size())
-        # assert False
-        max_result = torch.max(x + weighted, dim=1, keepdim=True)
-        return max_result.values
+        return x + w_
+
 
 
 @ARCH_REGISTRY.register()
-class GFPGANMultipleSelfAttentionv2(nn.Module):
+class GFPGANMultipleSelfAttentionv3(nn.Module):
     """The GFPGAN architecture: Unet + StyleGAN2 decoder with SFT.
 
     Ref: GFP-GAN: Towards Real-World Blind Face Restoration with Generative Facial Prior.
@@ -284,7 +341,7 @@ class GFPGANMultipleSelfAttentionv2(nn.Module):
             narrow=1,
             sft_half=False):
 
-        super(GFPGANMultipleSelfAttentionv2, self).__init__()
+        super(GFPGANMultipleSelfAttentionv3, self).__init__()
         self.input_is_latent = input_is_latent
         self.different_w = different_w
         self.num_style_feat = num_style_feat
@@ -315,8 +372,7 @@ class GFPGANMultipleSelfAttentionv2(nn.Module):
         for i in range(self.log_size, 2, -1):
             out_channels = channels[f'{2**(i - 1)}']
             self.conv_body_down.append(ResBlock(in_channels, out_channels, resample_kernel))
-            # self.attn_down.append(SelfAttention1D(out_channels))
-            self.attn_down.append(SelfAttention1D((2**(i - 1))**2))
+            self.attn_down.append(MultiHeadAttnBlock(out_channels))
             in_channels = out_channels
 
         self.final_conv = ConvLayer(in_channels, channels['4'], 3, bias=True, activate=True)
@@ -343,7 +399,7 @@ class GFPGANMultipleSelfAttentionv2(nn.Module):
         self.final_linear = EqualLinear(
             channels['4'] * 4 * 4, linear_out_channel, bias=True, bias_init_val=0, lr_mul=1, activation=None)
 
-        self.attn = SelfAttention1D(channels['4'] * 4 * 4)
+        self.final_attn = MultiHeadAttnBlock(channels['4'])
 
         # the decoder: stylegan2 generator with SFT modulations
         self.stylegan_decoder = StyleGAN2GeneratorSFT(
@@ -403,16 +459,22 @@ class GFPGANMultipleSelfAttentionv2(nn.Module):
 
         for i in range(self.log_size - 2):
             feat = self.conv_body_down[i](feat)
-            b, f, h, w = feat.size()
-            feat = self.attn_down[i](feat.view(feat.size(1), feat.size(0), -1))
-            feat = feat.view(1, f, h, w)
-            unet_skips.insert(0, feat) 
+            b, c, h, w = feat.size()
+            feat = self.attn_down[i](feat) # h, w, b, c
+            # feat = feat.permute(2, 3, 0, 1)
+            attention = torch.max(feat, dim=0, keepdim=True)[0]
 
+            # feat = feat.view(1, f, h, w)
+            unet_skips.insert(0, attention) 
+            # unet_skips.insert(0, feat) 
+
+        # feat = self.final_conv(attention)
         feat = self.final_conv(feat)
 
         # style code
         # feat2style = feat.view(1, feat.size(0), -1)
-        # feat2style = self.attn(feat2style)
+        feat = self.final_attn(feat)
+        feat = torch.max(feat, dim=0, keepdim=True)[0]
         # print(feat2style.size())
         # assert False
         style_code = self.final_linear(feat.view(feat.size(0), -1))
